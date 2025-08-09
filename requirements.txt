@@ -9,5 +9,6 @@ opencv-python-headless
 python-multipart
 gdown
 lime
+scikit-image
 
 
