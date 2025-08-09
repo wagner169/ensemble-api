@@ -1,33 +1,57 @@
 from __future__ import annotations
+
+import io
+import os
+from typing import Optional
+
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
-from typing import Optional
-import io
 from PIL import Image
 
-from .inference import ModelBundle, CLASS_NAMES, IMG_TFMS
+from .inference import ModelBundle, CLASS_NAMES
 from .ensemble import average_probs
-from .explainability import gradcam_base64
+
+# Grad-CAM es opcional y está apagado por defecto para ahorrar memoria
+ALLOW_GRADCAM = os.getenv("ALLOW_GRADCAM", "0").lower() in ("1", "true", "yes")
+try:
+    from .explainability import gradcam_base64  # si no existe, no rompemos
+except Exception:  # noqa: BLE001
+    gradcam_base64 = None
 
 app = FastAPI(title="Ensemble API")
-models = None
+models: ModelBundle | None = None
+
 
 @app.on_event("startup")
 async def _load():
     global models
     models = ModelBundle(models_dir="models")
 
+
 @app.get("/health")
 async def health():
     return {"ok": True}
 
+
 @app.post("/predict")
-async def predict(file: UploadFile = File(...), gradcam: Optional[bool] = Form(False)):
+async def predict(
+    file: UploadFile = File(...),
+    gradcam: Optional[bool] = Form(False),
+):
+    """
+    Predice la clase con ensamble y devuelve métricas de confianza.
+    Grad-CAM sólo se genera si:
+      - el cliente pide gradcam=true
+      - ALLOW_GRADCAM=1|true en variables de entorno
+      - existe gradcam_base64
+    """
+    assert models is not None, "Models not loaded"
+
     img_bytes = await file.read()
-    logits, per_model_probs = models.predict_single(img_bytes)
+    _, per_model_probs = models.predict_single(img_bytes)
     ens = average_probs(per_model_probs)
 
-    # Métricas de confianza/discordancia
+    # Top-1 + métricas de confianza/discordancia
     sorted_classes = sorted(ens.items(), key=lambda kv: kv[1], reverse=True)
     top_class, top_prob = sorted_classes[0]
     second_prob = sorted_classes[1][1] if len(sorted_classes) > 1 else 0.0
@@ -47,65 +71,11 @@ async def predict(file: UploadFile = File(...), gradcam: Optional[bool] = Form(F
         "classes": CLASS_NAMES,
     }
 
-    if gradcam:
+    # Grad-CAM opcional (apagado por defecto)
+    if gradcam and ALLOW_GRADCAM and gradcam_base64 is not None:
         pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        b64 = gradcam_base64(pil, models.resnet)
-        payload["gradcam_jpg_base64"] = b64
+        payload["gradcam_jpg_base64"] = gradcam_base64(pil, models.resnet)
 
     return JSONResponse(payload)
 
-# ---------- LIME ENDPOINT (con imports perezosos) ----------
-@app.post("/explain/lime")
-async def explain_lime(file: UploadFile = File(...)):
-    # IMPORTS PESADOS AQUÍ (para no cargarlos en el arranque)
-    import base64
-    import numpy as np
-    import cv2
-    import torch
-    import torch.nn.functional as F
-    from lime import lime_image
-    from skimage.segmentation import mark_boundaries
-
-    img_bytes = await file.read()
-    pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-
-    # Explicamos con el ResNet (puedes cambiar a otro)
-    model = models.resnet
-    model.eval()
-    device = next(model.parameters()).device
-
-    def batch_predict(imgs: list[np.ndarray]) -> np.ndarray:
-        xs = []
-        for arr in imgs:
-            xs.append(IMG_TFMS(Image.fromarray(arr)).unsqueeze(0))
-        x = torch.cat(xs, dim=0).to(device)
-        with torch.inference_mode():
-            logits = model(x)
-            probs = F.softmax(logits, dim=1).cpu().numpy()
-        return probs
-
-    explainer = lime_image.LimeImageExplainer()
-    explanation = explainer.explain_instance(
-        np.array(pil_img),
-        batch_predict,
-        top_labels=1,
-        hide_color=0,
-        num_samples=1000
-    )
-
-    temp, mask = explanation.get_image_and_mask(
-        explanation.top_labels[0],
-        positive_only=True,
-        num_features=5,
-        hide_rest=False
-    )
-    img_boundaries = mark_boundaries(temp / 255.0, mask)
-    img_boundaries = (img_boundaries * 255).astype(np.uint8)
-
-    ok, buf = cv2.imencode(".jpg", cv2.cvtColor(img_boundaries, cv2.COLOR_RGB2BGR))
-    if not ok:
-        return JSONResponse({"error": "No se pudo codificar imagen LIME"}, status_code=500)
-    b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
-    return {"lime_jpg_base64": b64}
-# ----------------------------------------------------------
 
