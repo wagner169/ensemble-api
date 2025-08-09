@@ -9,7 +9,7 @@ from pathlib import Path
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 NUM_CLASSES = 4
-CLASS_NAMES = ["clase_0", "clase_1", "clase_2", "clase_3"]  # cambia a tus clases reales
+CLASS_NAMES = ["Normal", "Opacidad Pulmonar", "Neumonía", "COVID-19"]  
 
 IMG_TFMS = transforms.Compose([
     transforms.Resize((224, 224)),
