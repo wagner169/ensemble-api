@@ -2,18 +2,8 @@ from __future__ import annotations
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from typing import Optional
-
-# --- NUEVOS IMPORTS ---
 import io
-import base64
-import numpy as np
-import cv2
-import torch
-import torch.nn.functional as F
 from PIL import Image
-from lime import lime_image
-from skimage.segmentation import mark_boundaries
-# -----------------------
 
 from .inference import ModelBundle, CLASS_NAMES, IMG_TFMS
 from .ensemble import average_probs
@@ -64,9 +54,18 @@ async def predict(file: UploadFile = File(...), gradcam: Optional[bool] = Form(F
 
     return JSONResponse(payload)
 
-# ---------- LIME ENDPOINT ----------
+# ---------- LIME ENDPOINT (con imports perezosos) ----------
 @app.post("/explain/lime")
 async def explain_lime(file: UploadFile = File(...)):
+    # IMPORTS PESADOS AQUÍ (para no cargarlos en el arranque)
+    import base64
+    import numpy as np
+    import cv2
+    import torch
+    import torch.nn.functional as F
+    from lime import lime_image
+    from skimage.segmentation import mark_boundaries
+
     img_bytes = await file.read()
     pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
 
@@ -108,4 +107,5 @@ async def explain_lime(file: UploadFile = File(...)):
         return JSONResponse({"error": "No se pudo codificar imagen LIME"}, status_code=500)
     b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
     return {"lime_jpg_base64": b64}
-# -----------------------------------
+# ----------------------------------------------------------
+
